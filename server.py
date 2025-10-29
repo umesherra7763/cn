@@ -65,21 +65,21 @@ class MessageType(IntEnum):
     AUTHENTICATION_SUCCESS = 2
     AUTHENTICATION_FAILURE = 3
     HEARTBEAT = 10
-    
+   
     # Chat (Module 4)
     SEND_TEXT_MESSAGE = 100
     BROADCAST_TEXT_MESSAGE = 101
-    
+   
     # Presence
     PRESENCE_UPDATE = 200
-    
+   
     # Screen Sharing (Module 3 - TCP)
     SCREEN_SHARE_START_REQUEST = 300
     SCREEN_SHARE_STOP_REQUEST = 301
     NOTIFY_SCREEN_SHARE_STARTED = 302
     NOTIFY_SCREEN_SHARE_STOPPED = 303
     SCREEN_SHARE_DATA_FRAME = 304  # Renamed from _BROADCAST
-    
+   
     # File Sharing (Module 5 - TCP)
     FILE_TRANSFER_NOTIFY_REQUEST = 400
     FILE_TRANSFER_NOTIFY_BROADCAST = 401
@@ -89,7 +89,7 @@ class MessageType(IntEnum):
     FILE_DOWNLOAD_START_REQUEST = 405
     FILE_DOWNLOAD_START_RESPONSE = 406
     FILE_TRANSFER_ERROR = 407
-    
+   
     # Audio/Video (UDP)
     SET_UDP_PORT_REQUEST = 500
     SET_UDP_PORT_SUCCESS = 501
@@ -133,7 +133,7 @@ log.addHandler(logging.StreamHandler(sys.stdout))
 
 class ServerWindow(QMainWindow):
     """The main GUI window for the server admin panel."""
-    
+   
     # Signal to update the user list from the asyncio thread
     update_user_list_signal = Signal(list)
 
@@ -172,10 +172,10 @@ class ServerWindow(QMainWindow):
         # Main layout
         main_widget = QWidget()
         main_layout = QVBoxLayout(main_widget)
-        
+       
         # Splitter to divide users and logs
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        
+       
         # Left panel: Connected Users
         user_panel = QWidget()
         user_layout = QVBoxLayout(user_panel)
@@ -196,7 +196,7 @@ class ServerWindow(QMainWindow):
         log_layout.addWidget(log_label)
         log_layout.addWidget(self.log_display)
         splitter.addWidget(log_panel)
-        
+       
         splitter.setSizes([200, 600])  # Initial sizes
         main_layout.addWidget(splitter)
         self.setCentralWidget(main_widget)
@@ -217,10 +217,10 @@ class ServerWindow(QMainWindow):
             color = "#f04747"  # Red
         elif levelname == "INFO":
             color = "#43b581"  # Green
-            
+           
         html_message = f'<span style="color: {color};">{message}</span>'
         self.log_display.append(html_message)
-        
+       
         # Auto-scroll to the bottom
         self.log_display.verticalScrollBar().setValue(
             self.log_display.verticalScrollBar().maximum()
@@ -259,13 +259,13 @@ class AudioProtocol(ServerProtocol, asyncio.DatagramProtocol):
         try:
             # 1. Extract session ID
             session_id = struct.unpack(UDP_HEADER_FORMAT, data[:UDP_HEADER_SIZE])[0]
-            
+           
             # 2. Get client info
             client = self.server_state.get_client_by_id(session_id)
             if not client:
                 # log.warning(f"Audio data from unknown session ID {session_id}")
                 return
-            
+           
             # 3. Store the audio chunk
             audio_data = data[UDP_HEADER_SIZE:]
             if len(audio_data) == self.chunk_size * 2: # 2 bytes per int16
@@ -273,7 +273,7 @@ class AudioProtocol(ServerProtocol, asyncio.DatagramProtocol):
             else:
                 # log.warning(f"Received malformed audio packet from {client['username']}")
                 pass
-                
+               
         except Exception as e:
             log.error(f"Error in AudioProtocol.datagram_received: {e}", exc_info=True)
 
@@ -358,83 +358,89 @@ class VideoProtocol(ServerProtocol, asyncio.DatagramProtocol):
     def __init__(self, server_state):
         super().__init__(server_state)
         self.transport = None
-        
+       
     def connection_made(self, transport):
         self.transport = transport
         log.info(f"Video Server (UDP) started on port {UDP_VIDEO_PORT}")
-        
+       
     def datagram_received(self, data, addr):
         try:
             # 1. Extract session ID
             session_id = struct.unpack(UDP_HEADER_FORMAT, data[:UDP_HEADER_SIZE])[0]
-            
+           
             # 2. Get client info
             client_from = self.server_state.get_client_by_id(session_id)
             if not client_from:
                 # log.warning(f"Video data from unknown session ID {session_id}")
                 return
-                
+               
             # Don't forward if client has video off
             if not client_from.get('is_video_on'):
                 return
 
             # 3. Get the raw video frame (which is just JPEG bytes)
             video_frame = data[UDP_HEADER_SIZE:]
-            
+           
             # 4. Create the packet to broadcast
             # Packet: [Sender_Session_ID (8 bytes)][JPEG_Frame_Data (...)]
             packet_to_send = data # We can just re-use the received packet
-            
+           
             # 5. Forward to all *other* clients who have video on
             all_clients = self.server_state.get_all_clients()
             for client_to in all_clients:
                 if client_to['id'] != client_from['id'] and client_to.get('video_port'):
                     addr_to = (client_to['addr'][0], client_to['video_port'])
                     self.transport.sendto(packet_to_send, addr_to)
-                    
+                   
         except Exception as e:
             log.error(f"Error in VideoProtocol.datagram_received: {e}", exc_info=True)
+
+# ---
+# ---
+# --- FIX 1: REPLACED THE ENTIRE FileTransferProtocol CLASS ---
+# ---
+# ---
 
 class FileTransferProtocol(asyncio.Protocol):
     """
     Handles Module 5: File Sharing (TCP) on port 5001.
-    
+   
     This protocol implements a state machine to handle the
     size-prefixed chunking protocol used by the client.
-    
+   
     Client Upload Protocol:
     1. Client sends header: [Mode (1 byte 'U')][File_ID (36 bytes)]
     2. Client sends file size: [File Size (8 bytes, !Q)]
     3. Client sends in a loop: [Chunk Size (4 bytes, !I)][Chunk Data (...)]
     4. Server sends ack: [b'1']
-    
+   
     Client Download Protocol:
     1. Client sends header: [Mode (1 byte 'D')][File_ID (36 bytes)]
     2. Server sends file size: [File Size (8 bytes, !Q)]
     3. Server sends in a loop: [Chunk Size (4 bytes, !I)][Chunk Data (...)]
     4. Client sends ack: [b'1']
     """
-    def _init_(self, server_state):
+    def __init__(self, server_state):
         self.server_state = server_state
         self.transport = None
         self.client_info = "Unknown"
         self.buffer = b''
         self._running = True
 
-        # --- FIX: Added state machine variables ---
+        # --- State machine variables ---
         self.state = "WAIT_HEADER"
         self.file_id = None
         self.file_info = None
         self.file_handle = None
-        
+       
         # For UPLOAD
         self.file_size = 0
         self.bytes_received = 0
         self.expected_chunk_size = 0
-        
+       
         # For DOWNLOAD
         self.download_task = None
-        
+       
         log.debug("FileTransferProtocol initialized")
 
     def connection_made(self, transport):
@@ -457,10 +463,10 @@ class FileTransferProtocol(asyncio.Protocol):
             if self.bytes_received < self.file_size:
                 log.warning(f"File upload for {self.file_id} was incomplete.")
                 # TODO: Delete the partial file
-        
+       
         if self.download_task:
             self.download_task.cancel()
-            
+           
         self._running = False
         log.debug(f"File connection closed from {self.client_info}")
 
@@ -468,21 +474,21 @@ class FileTransferProtocol(asyncio.Protocol):
         self.timeout_handle.cancel() # Received data, cancel timeout
         if not self._running:
             return
-            
+           
         try:
             self.buffer += data
-            # --- FIX: Process buffer as a state machine ---
+            # --- Process buffer as a state machine ---
             while self._running and self.buffer:
-                
+               
                 if self.state == "WAIT_HEADER":
                     if len(self.buffer) < 37:
                         break # Not enough data for header
-                    
+                   
                     header = self.buffer[:37]
                     self.buffer = self.buffer[37:]
                     mode = header[:1].decode('utf-8')
                     self.file_id = header[1:].decode('utf-8')
-                    
+                   
                     self.file_info = self.server_state.get_file_info(self.file_id)
                     if not self.file_info:
                         log.error(f"File ID {self.file_id} not found for {self.client_info}")
@@ -492,51 +498,51 @@ class FileTransferProtocol(asyncio.Protocol):
                     if mode == "U":
                         log.info(f"Receiving file '{self.file_info['filename']}' ({self.file_id}) from {self.client_info}")
                         self.state = "UPLOAD_WAIT_FILESIZE"
-                    
+                   
                     elif mode == "D":
                         log.info(f"Sending file '{self.file_info['filename']}' ({self.file_id}) to {self.client_info}")
                         self.state = "DOWNLOADING"
                         self.download_task = asyncio.create_task(self.start_download())
-                    
+                   
                     else:
                         log.error(f"Invalid file transfer mode '{mode}' from {self.client_info}")
                         self.transport.close()
                         return
-                
+               
                 elif self.state == "UPLOAD_WAIT_FILESIZE":
                     if len(self.buffer) < 8:
                         break # Not enough data
-                    
+                   
                     self.file_size = struct.unpack('!Q', self.buffer[:8])[0]
                     self.buffer = self.buffer[8:]
                     self.bytes_received = 0
-                    
+                   
                     if self.file_size != self.file_info['size']:
                         log.error(f"File size mismatch for {self.file_id}. Expected {self.file_info['size']}, client says {self.file_size}")
                         self.transport.close()
                         return
-                        
+                       
                     self.file_handle = open(self.file_info['filepath'], 'wb')
                     self.state = "UPLOAD_WAIT_CHUNK_SIZE"
-                
+               
                 elif self.state == "UPLOAD_WAIT_CHUNK_SIZE":
                     if len(self.buffer) < 4:
                         break # Not enough data
-                    
+                   
                     self.expected_chunk_size = struct.unpack('!I', self.buffer[:4])[0]
                     self.buffer = self.buffer[4:]
                     self.state = "UPLOAD_WAIT_CHUNK_DATA"
-                
+               
                 elif self.state == "UPLOAD_WAIT_CHUNK_DATA":
                     if len(self.buffer) < self.expected_chunk_size:
                         break # Not enough data
-                    
+                   
                     chunk_data = self.buffer[:self.expected_chunk_size]
                     self.buffer = self.buffer[self.expected_chunk_size:]
-                    
+                   
                     self.file_handle.write(chunk_data)
                     self.bytes_received += len(chunk_data)
-                    
+                   
                     if self.bytes_received >= self.file_size:
                         # --- UPLOAD COMPLETE ---
                         self.file_handle.close()
@@ -547,29 +553,29 @@ class FileTransferProtocol(asyncio.Protocol):
                         self.server_state.finalize_file_upload(self.file_id)
                         self.state = "COMPLETE"
                         self.transport.close() # Close connection
-                        
+                       
                     else:
                         # Wait for next chunk
                         self.state = "UPLOAD_WAIT_CHUNK_SIZE"
-                
+               
                 elif self.state == "DOWNLOADING":
                     # Waiting for download task to complete
                     # Any data received here is unexpected
                     log.warning(f"Unexpected data from {self.client_info} during download.")
                     self.buffer = b'' # Discard
                     break
-                    
+                   
                 elif self.state == "DOWNLOAD_WAIT_ACK":
                     if len(self.buffer) >= 1:
                         if self.buffer.startswith(b'1'):
                             log.info(f"Client acknowledged download for {self.file_id}")
                         self.transport.close()
                         break
-                    
+                   
                 elif self.state == "COMPLETE":
                     self._running = False
                     break
-                    
+                   
                 else:
                     break # No valid state, wait for more data
 
@@ -582,31 +588,31 @@ class FileTransferProtocol(asyncio.Protocol):
 
     async def start_download(self):
         """
-        --- FIX: This method now sends data in the
+        This method now sends data in the
         [size][chunk_size][chunk]... protocol.
         """
         filepath = self.file_info['filepath']
         try:
             file_size = os.path.getsize(filepath)
-            
+           
             # 1. Send file size (8 bytes)
             self.transport.write(struct.pack('!Q', file_size))
             await self.transport.drain()
-            
+           
             with open(filepath, 'rb') as f:
                 while True:
                     chunk = f.read(65536) # 64KB chunks
                     if not chunk:
                         break
-                    
+                   
                     # 2. Send chunk size (4 bytes)
                     self.transport.write(struct.pack('!I', len(chunk)))
-                    
+                   
                     # 3. Send chunk
                     self.transport.write(chunk)
-                    
+                   
                     await self.transport.drain() # Wait for buffer to clear
-            
+           
             # 4. Wait for client acknowledgment
             self.state = "DOWNLOAD_WAIT_ACK"
             log.info(f"File download complete for {self.file_id} to {self.client_info}")
@@ -621,12 +627,156 @@ class FileTransferProtocol(asyncio.Protocol):
             log.error(f"Error sending file {filepath}: {e}", exc_info=True)
             self.transport.close()
 
+# --- (End of Fix 1) ---
+
+
+class ClientHandler:
+    """
+    Manages a single client connection on the TCP Command Server.
+    This class contains all the logic for Modules 3, 4, 5.
+    """
+    def __init__(self, reader, writer, server_state):
+        self.reader = reader
+        self.writer = writer
+        self.server_state = server_state
+        self.addr = writer.get_extra_info('peername')
+        self.client_id = None
+        self.username = "Unknown"
+        self.last_heartbeat = asyncio.get_running_loop().time()
+        self.is_running = True
+
+    async def handle_client(self):
+        """Main loop for reading messages from a single client."""
+        log.info(f"New command connection from {self.addr}")
+        try:
+            while self.is_running:
+                # 1. Read the fixed-size header
+                header_bytes = await self.reader.readexactly(HEADER_SIZE)
+                if not header_bytes:
+                    break
+               
+                # 2. Unpack the header
+                magic, ver, msg_type_val, session_id, payload_len = struct.unpack(HEADER_FORMAT, header_bytes)
+               
+                # 3. Validate header
+                if magic != MAGIC_NUMBER:
+                    log.error(f"Invalid magic number from {self.addr}. Disconnecting.")
+                    break
+               
+                if self.client_id and session_id != self.client_id:
+                    log.warning(f"Session ID mismatch for {self.username}. Expected {self.client_id}, got {session_id}")
+                    # Don't break, but log it
+               
+                try:
+                    msg_type = MessageType(msg_type_val)
+                except ValueError:
+                    log.error(f"Unknown message type {msg_type_val} from {self.username}")
+                    # Discard payload if unknown
+                    if payload_len > 0:
+                        await self.reader.readexactly(payload_len)
+                    continue
+               
+                # 4. Read the variable-length payload
+                payload_data = {}
+                if payload_len > 0:
+                    payload_bytes = await self.reader.readexactly(payload_len)
+                    if not payload_bytes:
+                        break
+                    try:
+                        payload_data = json.loads(payload_bytes.decode('utf-8'))
+                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                        log.error(f"Failed to decode payload from {self.username}: {e}")
+                        continue
+               
+                log.debug(f"Received {msg_type.name} from {self.username} ({payload_len} bytes)")
+               
+                # 5. Route the message to the correct handler
+                if msg_type == MessageType.AUTHENTICATION_REQUEST:
+                    await self.handle_authentication(payload_data)
+                elif msg_type == MessageType.HEARTBEAT:
+                    self.last_heartbeat = asyncio.get_running_loop().time()
+                elif msg_type == MessageType.SEND_TEXT_MESSAGE:
+                    await self.handle_text_message(payload_data)
+                elif msg_type == MessageType.SCREEN_SHARE_START_REQUEST:
+                    await self.handle_screen_share_start()
+                elif msg_type == MessageType.SCREEN_SHARE_STOP_REQUEST:
+                    await self.handle_screen_share_stop()
+                elif msg_type == MessageType.SCREEN_SHARE_DATA_FRAME:
+                    await self.handle_screen_share_data(payload_data)
+                elif msg_type == MessageType.FILE_TRANSFER_NOTIFY_REQUEST:
+                    await self.handle_file_notify(payload_data)
+                elif msg_type == MessageType.FILE_UPLOAD_START_REQUEST:
+                    await self.handle_file_upload_start(payload_data)
+                elif msg_type == MessageType.FILE_DOWNLOAD_START_REQUEST:
+                    await self.handle_file_download_start(payload_data)
+                # elif msg_type == MessageType.SET_UDP_PORT_REQUEST:
+                #     await self.handle_set_udp_port(payload_data)
+                elif msg_type == MessageType.SET_UDP_PORT_REQUEST:
+                    await self.handle_set_udp_port(payload_data)
+                elif msg_type == MessageType.SET_MEDIA_STATE_REQUEST:  # <-- ADD THIS ELIF BLOCK
+                    await self.handle_set_media_state(payload_data)
+                else:
+                    log.warning(f"Unhandled message type {msg_type.name} from {self.username}")
+
+        except asyncio.IncompleteReadError:
+            log.info(f"Client {self.username} (TCP) closed the connection.")
+        except ConnectionError as e:
+            log.warning(f"Connection error for {self.username}: {e}")
+        except Exception as e:
+            log.error(f"Error handling client {self.username}: {e}", exc_info=True)
+        finally:
+            self.is_running = False
+            # Clean up client state
+            if self.client_id:
+                # If this client was presenting, stop it
+                if self.server_state.is_presenter(self.client_id):
+                    await self.handle_screen_share_stop()
+                   
+                self.server_state.remove_client(self.client_id)
+            if self.writer and not self.writer.is_closing():
+                self.writer.close()
+                await self.writer.wait_closed()
+            log.info(f"Connection from {self.username} @ {self.addr} closed.")
+            await self.server_state.broadcast_presence()
+
+    async def send_message(self, msg_type: MessageType, payload: dict, session_id: int = None):
+        """Packs and sends a message to this client."""
+        if self.writer.is_closing():
+            log.warning(f"Attempted to write to closed socket for {self.username}")
+            return
+           
+        if session_id is None:
+            session_id = self.client_id if self.client_id else 0
+           
+        try:
+            payload_bytes = json.dumps(payload).encode('utf-8')
+            payload_len = len(payload_bytes)
+           
+            header = struct.pack(
+                HEADER_FORMAT,
+                MAGIC_NUMBER,
+                PROTOCOL_VERSION,
+                msg_type.value,
+                session_id,
+                payload_len
+            )
+           
+            self.writer.write(header)
+            self.writer.write(payload_bytes)
+            await self.writer.drain()
+            log.debug(f"Sent {msg_type.name} to {self.username}")
+           
+        except ConnectionError as e:
+            log.warning(f"Connection error while sending to {self.username}: {e}")
+            self.is_running = False # Mark for cleanup
+        except Exception as e:
+            log.error(f"Error in send_message for {self.username}: {e}", exc_info=True)
 
     async def handle_authentication(self, payload):
         """Handles Module 4: Authentication"""
         username = payload.get('username')
         password = payload.get('password')
-        
+       
         # --- Dummy Authentication (Dev Plan 5.2.2) ---
         # In a real app, check this against a database.
         # For now, we only check for a valid username and that
@@ -638,19 +788,19 @@ class FileTransferProtocol(asyncio.Protocol):
             self.username = username
             self.client_id = self.server_state.add_client(self)
             log.info(f"User '{username}' authenticated successfully. Assigned ID {self.client_id}")
-            
+           
             payload_out = {
                 'message': f"Welcome, {username}!",
                 'session_id': self.client_id
             }
             await self.send_message(MessageType.AUTHENTICATION_SUCCESS, payload_out, self.client_id)
-            
+           
             # Send initial file list
             await self.server_state.send_file_list(self)
-            
+           
             # Broadcast new user list to everyone
             await self.server_state.broadcast_presence()
-        
+       
         else:
             log.warning(f"Failed authentication attempt for username: '{username}'")
             payload_out = {'message': "Authentication failed. Invalid credentials or username already in use."}
@@ -662,9 +812,9 @@ class FileTransferProtocol(asyncio.Protocol):
         text = payload.get('text')
         if not text:
             return
-            
+           
         log.info(f"Chat from {self.username}: {text}")
-        
+       
         broadcast_payload = {
             'username': self.username,
             'text': text
@@ -674,17 +824,17 @@ class FileTransferProtocol(asyncio.Protocol):
             broadcast_payload,
             exclude_id=self.client_id # Don't send back to sender
         )
-        
+       
     async def handle_set_udp_port(self, payload):
         """Handles Modules 1 & 2: Client reports its UDP ports"""
         audio_port = payload.get('audio_port')
         video_port = payload.get('video_port')
-        
+       
 
         if audio_port:
             self.server_state.set_client_udp_port(self.client_id, 'audio_port', audio_port)
             log.info(f"Registered audio (UDP) port {audio_port} for {self.username}")
-            
+           
         if video_port:
             self.server_state.set_client_udp_port(self.client_id, 'video_port', video_port)
             log.info(f"Registered video (UDP) port {video_port} for {self.username}")
@@ -696,7 +846,7 @@ class FileTransferProtocol(asyncio.Protocol):
         """Handles client toggling mic or video."""
         media_type = payload.get('media_type') # 'audio' or 'video'
         state = payload.get('state') # True or False
-        
+       
         if media_type and state is not None:
             self.server_state.set_client_media_state(self.client_id, media_type, state)
     # --- END OF NEW FUNCTION ---
@@ -715,7 +865,7 @@ class FileTransferProtocol(asyncio.Protocol):
         else:
             log.warning(f"{self.username} tried to start screen share, but someone else is already presenting.")
             # TODO: Send an error back? For now, client UI should prevent this.
-            
+           
     async def handle_screen_share_stop(self):
         """Client (presenter) stops sharing."""
         if self.server_state.clear_presenter(self.client_id):
@@ -726,7 +876,7 @@ class FileTransferProtocol(asyncio.Protocol):
             )
         else:
             log.warning(f"{self.username} tried to stop screen share, but was not the presenter.")
-            
+           
     async def handle_screen_share_data(self, payload):
         """Presenter is sending a frame of data."""
         if self.server_state.is_presenter(self.client_id):
@@ -739,7 +889,7 @@ class FileTransferProtocol(asyncio.Protocol):
             )
         else:
             log.warning(f"{self.username} sent screen share data but is not the presenter. Ignoring.")
-            
+           
     # --- Module 5: File Sharing Handlers ---
     async def handle_file_notify(self, payload):
         """
@@ -750,15 +900,15 @@ class FileTransferProtocol(asyncio.Protocol):
         size = payload.get('size')
         if not filename or not size:
             return await self.send_message(MessageType.FILE_TRANSFER_ERROR, {'message': 'Invalid file info.'})
-            
+           
         file_id, filepath = self.server_state.register_new_file(filename, size, self.username, self.client_id)
-        
+       
         log.info(f"{self.username} registered file '{filename}' ({size} bytes) with ID {file_id}")
-        
+       
         # Tell client "OK, you can start uploading this file."
         payload_out = {'file_id': file_id, 'filename': filename}
         await self.send_message(MessageType.FILE_UPLOAD_START_RESPONSE, payload_out)
-        
+       
     async def handle_file_upload_start(self, payload):
         """
         Deprecated. Replaced by FILE_TRANSFER_NOTIFY_REQUEST.
@@ -772,13 +922,22 @@ class FileTransferProtocol(asyncio.Protocol):
         Server just responds "OK, connect to the file port."
         """
         file_id = payload.get('file_id')
-        if not file_id or not self.server_state.get_file_info(file_id):
+            # Get the full file info from the server state
+        file_info = self.server_state.get_file_info(file_id) 
+
+        if not file_info:
             return await self.send_message(MessageType.FILE_TRANSFER_ERROR, {'message': 'Invalid file ID.'})
 
         log.info(f"{self.username} requested to download file {file_id}.")
-        
-        # Tell client "OK, connect to file port 5001 and send this file_id"
-        payload_out = {'file_id': file_id, 'file_port': TCP_FILE_PORT}
+
+        # --- FIX ---
+        # Add the filename to the response payload.
+        # This gives the client the info it needs to prevent the KeyError.
+        payload_out = {
+            'file_id': file_id, 
+            'file_port': TCP_FILE_PORT,
+            'filename': file_info['filename']  # <-- ADD THIS LINE
+        }
         await self.send_message(MessageType.FILE_DOWNLOAD_START_RESPONSE, payload_out)
 
 
@@ -792,11 +951,11 @@ class ServerState:
         self.client_id_counter = 0
         self.gui_signal = gui_signal  # To update user list
         self.current_presenter_id = None
-        
+       
         # --- File Sharing State ---
         self.file_registry = {} # {file_id: {filename, size, ...}}
         self.file_id_counter = 0
-        
+       
         # --- Audio/Video State ---
         self.client_state = defaultdict(dict) # {client_id: {audio_port, ...}}
 
@@ -804,7 +963,7 @@ class ServerState:
         if not os.path.exists(UPLOADS_DIR):
             os.makedirs(UPLOADS_DIR)
             log.info(f"Created uploads directory: {UPLOADS_DIR}")
-        
+       
     def add_client(self, client_handler):
         """Adds a new, authenticated client to the state."""
         self.client_id_counter += 1
@@ -830,11 +989,11 @@ class ServerState:
         if client_id in self.client_state:
             del self.client_state[client_id]
         self.update_gui_user_list()
-        
+       
     def get_client_by_id(self, client_id):
         """Gets the client state dict by ID."""
         return self.client_state.get(client_id)
-        
+       
     def get_all_clients(self):
         """Returns a list of all client state dicts."""
         return list(self.client_state.values())
@@ -856,7 +1015,7 @@ class ServerState:
         for client_id, client_handler in self.clients.items():
             if client_id != exclude_id:
                 await client_handler.send_message(msg_type, payload)
-                
+               
     async def broadcast_presence(self):
         """Broadcasts the current user list (with IDs) to all clients."""
         log.info("Broadcasting presence update.")
@@ -869,7 +1028,7 @@ class ServerState:
 
         payload = {'users': user_list}
         await self.broadcast_message(MessageType.PRESENCE_UPDATE, payload)
-        
+       
     async def check_heartbeats(self):
         """
         Periodically checks for client heartbeats and disconnects
@@ -880,7 +1039,7 @@ class ServerState:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
             now = asyncio.get_running_loop().time()
             timed_out_clients = []
-            
+           
             for client_id, client_handler in self.clients.items():
                 if now - client_handler.last_heartbeat > CLIENT_TIMEOUT:
                     log.warning(f"Client {client_handler.username} timed out. Disconnecting.")
@@ -888,7 +1047,7 @@ class ServerState:
                     client_handler.is_running = False # Signal handler to stop
                     if client_handler.writer and not client_handler.writer.is_closing():
                         client_handler.writer.close()
-            
+           
             # We can't modify the dict while iterating, so no cleanup needed
             # as the handle_client loop will do it.
             if timed_out_clients:
@@ -901,14 +1060,14 @@ class ServerState:
             self.current_presenter_id = client_id
             return True
         return False
-        
+       
     def clear_presenter(self, client_id):
         """Clears the presenter, if it's the given client."""
         if self.current_presenter_id == client_id:
             self.current_presenter_id = None
             return True
         return False
-        
+       
     def is_presenter(self, client_id):
         """Checks if a client is the current presenter."""
         return self.current_presenter_id == client_id
@@ -919,7 +1078,7 @@ class ServerState:
         self.file_id_counter += 1
         file_id = f"{self.file_id_counter}-{uuid.uuid4().hex[:8]}"
         filepath = os.path.join(UPLOADS_DIR, f"{file_id}_{filename}")
-        
+       
         self.file_registry[file_id] = {
             'file_id': file_id,
             'filename': filename,
@@ -930,7 +1089,7 @@ class ServerState:
             'uploaded': False # Mark as not yet uploaded
         }
         return file_id, filepath
-        
+       
     def get_file_info(self, file_id):
         """Retrieves metadata for a file."""
         return self.file_registry.get(file_id)
@@ -943,10 +1102,10 @@ class ServerState:
         file_info = self.get_file_info(file_id)
         if not file_info:
             return
-            
+           
         file_info['uploaded'] = True
         log.info(f"File {file_info['filename']} is now available for download.")
-        
+       
         # Create broadcast payload
         payload = {
             'file_id': file_info['file_id'],
@@ -954,13 +1113,13 @@ class ServerState:
             'size': file_info['size'],
             'uploader_name': file_info['uploader_name']
         }
-        
+       
         # Run this in a new task so it doesn't block the file server
         asyncio.create_task(self.broadcast_message(
             MessageType.FILE_TRANSFER_NOTIFY_BROADCAST,
             payload
         ))
-        
+       
     async def send_file_list(self, client_handler):
         """Sends the list of all *available* files to a single client."""
         log.debug(f"Sending file list to {client_handler.username}")
@@ -991,8 +1150,8 @@ class ServerState:
             elif media_type == 'video':
                 self.client_state[client_id]['is_video_on'] = state
                 log.debug(f"{self.client_state[client_id]['username']} video is now {'ON' if state else 'OFF'}")
-            
-    
+           
+   
 
 
 class AsyncioServerThread(QThread):
@@ -1008,27 +1167,32 @@ class AsyncioServerThread(QThread):
     async def main(self):
         """The main asyncio task that starts all servers."""
         self.loop = asyncio.get_running_loop()
-        
+       
         # --- Start TCP Command Server (Module 4, 3, 5) ---
         tcp_command_server = await asyncio.start_server(
             self.handle_new_client,  # This function is called for each new client
             HOST,
             TCP_COMMAND_PORT
         )
-        
-        # --- Start TCP File Server (Module 5) ---
-        tcp_file_server = await asyncio.start_server(
-            lambda r, w: FileTransferProtocol(self.server_state, r, w) if 'FileTransferProtocol' in globals() else None,
+       
+        # ---
+        # ---
+        # --- FIX 2: REPLACED asyncio.start_server with self.loop.create_server
+        # ---
+        # ---
+        tcp_file_server = await self.loop.create_server(
+            lambda: FileTransferProtocol(self.server_state),  # This is a protocol factory
             HOST,
             TCP_FILE_PORT
         )
+        # --- (End of Fix 2) ---
 
         # --- Start UDP Audio Server (Module 2) ---
         audio_transport, _ = await self.loop.create_datagram_endpoint(
             lambda: AudioProtocol(self.server_state),
             local_addr=(HOST, UDP_AUDIO_PORT)
         )
-        
+       
         # --- Start UDP Video Server (Module 1) ---
         video_transport, _ = await self.loop.create_datagram_endpoint(
             lambda: VideoProtocol(self.server_state),
@@ -1040,10 +1204,10 @@ class AsyncioServerThread(QThread):
         audio_mix_task = asyncio.create_task(
             audio_transport.get_protocol().broadcast_mixed_audio()
         )
-        
+       
         log.info(f"TCP Command Server started on port {TCP_COMMAND_PORT}")
         log.info(f"TCP File Server started on port {TCP_FILE_PORT}")
-        
+       
         # Keep servers running
         try:
             await asyncio.gather(
@@ -1081,7 +1245,7 @@ class AsyncioServerThread(QThread):
             asyncio.run(self.main())
         except Exception as e:
             log.critical(f"Critical error in asyncio main loop: {e}", exc_info=True)
-            
+           
     def stop(self):
         """Stops the asyncio event loop from the main thread."""
         log.info("Stopping asyncio server thread...")
@@ -1095,26 +1259,26 @@ def main():
     """Main entry point for the application."""
     # Set thread name for main GUI thread
     threading.current_thread().name = "MainGUIThread"
-    
+   
     app = QApplication(sys.argv)
-    
+   
     # Create the ServerWindow
     window = ServerWindow(app)
-    
+   
     # Create the server state manager
     # Pass it the signal to update the GUI
     server_state = ServerState(window.update_user_list_signal)
-    
+   
     # Create and start the asyncio server thread
     server_thread = AsyncioServerThread(server_state)
     server_thread.start()
-    
+   
     # Show the window and run the Qt app loop
     window.show()
-    
+   
     # Connect app exit to stopping the server thread
     app.aboutToQuit.connect(server_thread.stop)
-    
+   
     sys.exit(app.exec())
 
 if __name__ == "__main__":
