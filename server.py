@@ -39,6 +39,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QObject, QThread, Signal, Qt, Slot
 from PySide6.QtGui import QColor
 
+from file_server import FileTransferServer
+
 # --- Configuration ---
 HOST = '192.168.100.2'  # Listen on all available network interfaces
 TCP_COMMAND_PORT = 5000
@@ -1114,32 +1116,6 @@ class AsyncioServerThread(QThread):
         log.info("Server thread stopped.")
 
 
-def main():
-    """Main entry point for the application."""
-    # Set thread name for main GUI thread
-    threading.current_thread().name = "MainGUIThread"
-    
-    app = QApplication(sys.argv)
-    
-    # Create the ServerWindow
-    window = ServerWindow(app)
-    
-    # Create the server state manager
-    # Pass it the signal to update the GUI
-    server_state = ServerState(window.update_user_list_signal)
-    
-    # Create and start the asyncio server thread
-    server_thread = AsyncioServerThread(server_state)
-    server_thread.start()
-    
-    # Show the window and run the Qt app loop
-    window.show()
-    
-    # Connect app exit to stopping the server thread
-    app.aboutToQuit.connect(server_thread.stop)
-    
-    sys.exit(app.exec())
-
 if __name__ == "__main__":
-    main()
+    print("Please run main_server.py instead.")
 

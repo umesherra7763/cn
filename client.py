@@ -680,18 +680,27 @@ class FileTransferThread(QThread):
         try:
             with open(self.filepath, 'rb') as f:
                 file_size = os.path.getsize(self.filepath)
+                # Send file size first (8 bytes)
+                sock.sendall(struct.pack('!Q', file_size))
+                
                 bytes_sent = 0
                 while self._running:
                     chunk = f.read(65536) # 64KB chunks
                     if not chunk:
                         break
+                    # Send chunk size first (4 bytes), then the chunk
+                    sock.sendall(struct.pack('!I', len(chunk)))
                     sock.sendall(chunk)
                     bytes_sent += len(chunk)
                     progress = int((bytes_sent / file_size) * 100)
                     self.transfer_progress.emit(progress)
                     
-            if self._running:
-                self.transfer_complete.emit(self.file_id)
+                # Wait for server acknowledgment
+                ack = sock.recv(1)
+                if ack == b'1' and self._running:
+                    self.transfer_complete.emit(self.file_id)
+                else:
+                    self.transfer_error.emit(self.file_id, "Transfer not acknowledged by server")
                 
         except FileNotFoundError:
             self.transfer_error.emit(self.file_id, "Local file not found.")
@@ -700,15 +709,36 @@ class FileTransferThread(QThread):
 
     def run_download(self, sock):
         try:
+            # First receive file size (8 bytes)
+            size_data = sock.recv(8)
+            if not size_data or len(size_data) != 8:
+                raise Exception("Failed to receive file size")
+            file_size = struct.unpack('!Q', size_data)[0]
+            
             with open(self.filepath, 'wb') as f:
-                # We don't know the file size, so we can't show progress
-                # (unless server sends it, which is a protocol enhancement)
-                self.transfer_progress.emit(50) # Show generic "in-progress"
-                while self._running:
-                    chunk = sock.recv(65536) # 64KB chunks
-                    if not chunk:
-                        break
+                bytes_received = 0
+                while self._running and bytes_received < file_size:
+                    # Get chunk size first (4 bytes)
+                    size_data = sock.recv(4)
+                    if not size_data or len(size_data) != 4:
+                        raise Exception("Failed to receive chunk size")
+                    chunk_size = struct.unpack('!I', size_data)[0]
+                    
+                    # Now receive exactly chunk_size bytes
+                    chunk = b''
+                    while len(chunk) < chunk_size:
+                        piece = sock.recv(chunk_size - len(chunk))
+                        if not piece:
+                            raise Exception("Connection closed before receiving complete chunk")
+                        chunk += piece
+                    
                     f.write(chunk)
+                    bytes_received += len(chunk)
+                    progress = int((bytes_received / file_size) * 100)
+                    self.transfer_progress.emit(progress)
+            
+            # Send acknowledgment
+            sock.sendall(b'1')
             
             if self._running:
                 self.transfer_complete.emit(self.file_id)
