@@ -26,17 +26,32 @@ class FileTransferServer:
         self.server = None
 
     async def start(self):
-        """Starts the file transfer server."""
-        try:
-            self.server = await asyncio.start_server(
-                self.handle_file_client,
-                self.host,
-                self.port
-            )
-            addr = self.server.sockets[0].getsockname()
-            log.info(f'File transfer server running on {addr}')
-        except Exception as e:
-            log.error(f"Failed to start file server: {e}")
+        """Starts the file transfer server.
+
+        Tries a small set of candidate addresses if the configured host
+        cannot be bound (e.g. when HOST is a LAN IP not present on this
+        machine). Returns the asyncio.Server on success or raises the
+        last exception on failure.
+        """
+        candidates = [self.host, '0.0.0.0', '127.0.0.1']
+        last_exc = None
+        for candidate in candidates:
+            try:
+                self.server = await asyncio.start_server(
+                    self.handle_file_client,
+                    candidate,
+                    self.port
+                )
+                addr = self.server.sockets[0].getsockname()
+                log.info(f'File transfer server running on {addr}')
+                return self.server
+            except OSError as e:
+                last_exc = e
+                log.warning(f"Could not bind file server on {candidate}:{self.port} -> {e}")
+
+        # If we get here, all candidates failed
+        log.error(f"Failed to start file server on any candidate address: {last_exc}")
+        raise last_exc
 
     async def handle_file_client(self, reader, writer):
         """

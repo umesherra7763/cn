@@ -680,27 +680,18 @@ class FileTransferThread(QThread):
         try:
             with open(self.filepath, 'rb') as f:
                 file_size = os.path.getsize(self.filepath)
-                # Send file size first (8 bytes)
-                sock.sendall(struct.pack('!Q', file_size))
-                
                 bytes_sent = 0
                 while self._running:
                     chunk = f.read(65536) # 64KB chunks
                     if not chunk:
                         break
-                    # Send chunk size first (4 bytes), then the chunk
-                    sock.sendall(struct.pack('!I', len(chunk)))
                     sock.sendall(chunk)
                     bytes_sent += len(chunk)
                     progress = int((bytes_sent / file_size) * 100)
                     self.transfer_progress.emit(progress)
                     
-                # Wait for server acknowledgment
-                ack = sock.recv(1)
-                if ack == b'1' and self._running:
-                    self.transfer_complete.emit(self.file_id)
-                else:
-                    self.transfer_error.emit(self.file_id, "Transfer not acknowledged by server")
+            if self._running:
+                self.transfer_complete.emit(self.file_id)
                 
         except FileNotFoundError:
             self.transfer_error.emit(self.file_id, "Local file not found.")
@@ -709,36 +700,15 @@ class FileTransferThread(QThread):
 
     def run_download(self, sock):
         try:
-            # First receive file size (8 bytes)
-            size_data = sock.recv(8)
-            if not size_data or len(size_data) != 8:
-                raise Exception("Failed to receive file size")
-            file_size = struct.unpack('!Q', size_data)[0]
-            
             with open(self.filepath, 'wb') as f:
-                bytes_received = 0
-                while self._running and bytes_received < file_size:
-                    # Get chunk size first (4 bytes)
-                    size_data = sock.recv(4)
-                    if not size_data or len(size_data) != 4:
-                        raise Exception("Failed to receive chunk size")
-                    chunk_size = struct.unpack('!I', size_data)[0]
-                    
-                    # Now receive exactly chunk_size bytes
-                    chunk = b''
-                    while len(chunk) < chunk_size:
-                        piece = sock.recv(chunk_size - len(chunk))
-                        if not piece:
-                            raise Exception("Connection closed before receiving complete chunk")
-                        chunk += piece
-                    
+                # We don't know the file size, so we can't show progress
+                # (unless server sends it, which is a protocol enhancement)
+                self.transfer_progress.emit(50) # Show generic "in-progress"
+                while self._running:
+                    chunk = sock.recv(65536) # 64KB chunks
+                    if not chunk:
+                        break
                     f.write(chunk)
-                    bytes_received += len(chunk)
-                    progress = int((bytes_received / file_size) * 100)
-                    self.transfer_progress.emit(progress)
-            
-            # Send acknowledgment
-            sock.sendall(b'1')
             
             if self._running:
                 self.transfer_complete.emit(self.file_id)
@@ -1687,7 +1657,9 @@ class MainWindow(QMainWindow):
         thread.transfer_progress.connect(self.status_progress.setValue)
 
         self.file_transfer_threads[file_id] = thread
+        log.info(f"Starting UPLOAD thread for file_id {file_id} to {self.server_host}:{TCP_FILE_PORT}") # <-- ADD THIS
         thread.start()
+        
         
     @Slot(str, str)
     def on_file_download_approved(self, file_id, filename):
@@ -1707,6 +1679,7 @@ class MainWindow(QMainWindow):
         thread.transfer_progress.connect(self.status_progress.setValue)
         
         self.file_transfer_threads[file_id] = thread
+        log.info(f"Starting DOWNLOAD thread for file_id {file_id} from {self.server_host}:{TCP_FILE_PORT}")
         thread.start()
 
     # --- Controller Slots for View Signals ---
@@ -1765,17 +1738,7 @@ class MainWindow(QMainWindow):
         self.network_client.file_download_approved.connect(self.on_file_download_approved)
 
         # 2. Connect ALL signals again (required for new instance)
-        self.network_client.connection_status.connect(self.on_connection_status)
-        self.network_client.authentication_success.connect(self.on_auth_success)
-        self.network_client.authentication_failure.connect(self.on_auth_failure)
-        self.network_client.message_received.connect(self.conference_page.add_chat_message)
-        self.network_client.presence_update.connect(self.on_presence_update)
-        self.network_client.screen_share_started.connect(self.conference_page.set_presenter)
-        self.network_client.screen_share_stopped.connect(self.conference_page.stop_presenting)
-        self.network_client.screen_share_data_received.connect(self.conference_page.update_screen_share_image)
-        self.network_client.file_notify_received.connect(self.on_file_notify)
-        self.network_client.file_upload_approved.connect(self.on_file_upload_approved)
-        self.network_client.file_download_approved.connect(self.on_file_download_approved)
+
 
         # 3. Add temporary signal to send login *after* connection established
         self.network_client.connection_status.connect(self.on_initial_connection_for_login)
@@ -2062,4 +2025,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
