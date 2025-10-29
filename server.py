@@ -397,23 +397,50 @@ class VideoProtocol(ServerProtocol, asyncio.DatagramProtocol):
 
 class FileTransferProtocol(asyncio.Protocol):
     """
-    Handles Module 5: File Sharing (TCP).
-    This runs on a separate port (5001) for high-speed transfers.
+    Handles Module 5: File Sharing (TCP) on port 5001.
+    
+    This protocol implements a state machine to handle the
+    size-prefixed chunking protocol used by the client.
+    
+    Client Upload Protocol:
+    1. Client sends header: [Mode (1 byte 'U')][File_ID (36 bytes)]
+    2. Client sends file size: [File Size (8 bytes, !Q)]
+    3. Client sends in a loop: [Chunk Size (4 bytes, !I)][Chunk Data (...)]
+    4. Server sends ack: [b'1']
+    
+    Client Download Protocol:
+    1. Client sends header: [Mode (1 byte 'D')][File_ID (36 bytes)]
+    2. Server sends file size: [File Size (8 bytes, !Q)]
+    3. Server sends in a loop: [Chunk Size (4 bytes, !I)][Chunk Data (...)]
+    4. Client sends ack: [b'1']
     """
-    def __init__(self, server_state):
+    def _init_(self, server_state):
         self.server_state = server_state
-        self.state = "INIT" # INIT, UPLOAD, DOWNLOAD
+        self.transport = None
+        self.client_info = "Unknown"
+        self.buffer = b''
+        self._running = True
+
+        # --- FIX: Added state machine variables ---
+        self.state = "WAIT_HEADER"
         self.file_id = None
+        self.file_info = None
         self.file_handle = None
+        
+        # For UPLOAD
         self.file_size = 0
         self.bytes_received = 0
-        self.client_info = "Unknown" # For logging
+        self.expected_chunk_size = 0
+        
+        # For DOWNLOAD
+        self.download_task = None
+        
+        log.debug("FileTransferProtocol initialized")
 
     def connection_made(self, transport):
         self.transport = transport
         self.client_info = transport.get_extra_info('peername')
         log.info(f"File connection from {self.client_info} on port {TCP_FILE_PORT}")
-        self.state = "WAIT_HEADER"
         # Set a 5-second timeout to receive the header
         self.timeout_handle = asyncio.get_running_loop().call_later(
             5, self.check_timeout
@@ -424,68 +451,168 @@ class FileTransferProtocol(asyncio.Protocol):
             log.warning(f"File connection from {self.client_info} timed out waiting for header.")
             self.transport.close()
 
+    def connection_lost(self, exc):
+        if self.state == "UPLOADING" and self.file_handle:
+            self.file_handle.close()
+            if self.bytes_received < self.file_size:
+                log.warning(f"File upload for {self.file_id} was incomplete.")
+                # TODO: Delete the partial file
+        
+        if self.download_task:
+            self.download_task.cancel()
+            
+        self._running = False
+        log.debug(f"File connection closed from {self.client_info}")
+
     def data_received(self, data):
         self.timeout_handle.cancel() # Received data, cancel timeout
-        
+        if not self._running:
+            return
+            
         try:
-            if self.state == "WAIT_HEADER":
-                # Header: [Mode (1 byte: U or D)][File_ID (36 bytes)]
-                mode = data[:1].decode('utf-8')
-                self.file_id = data[1:37].decode('utf-8')
+            self.buffer += data
+            # --- FIX: Process buffer as a state machine ---
+            while self._running and self.buffer:
                 
-                file_info = self.server_state.get_file_info(self.file_id)
-                if not file_info:
-                    log.error(f"File ID {self.file_id} not found for {self.client_info}")
-                    self.transport.close()
-                    return
+                if self.state == "WAIT_HEADER":
+                    if len(self.buffer) < 37:
+                        break # Not enough data for header
+                    
+                    header = self.buffer[:37]
+                    self.buffer = self.buffer[37:]
+                    mode = header[:1].decode('utf-8')
+                    self.file_id = header[1:].decode('utf-8')
+                    
+                    self.file_info = self.server_state.get_file_info(self.file_id)
+                    if not self.file_info:
+                        log.error(f"File ID {self.file_id} not found for {self.client_info}")
+                        self.transport.close()
+                        return
 
-                if mode == "U":
-                    log.info(f"Receiving file '{file_info['filename']}' ({self.file_id}) from {self.client_info}")
-                    self.state = "UPLOADING"
-                    self.file_handle = open(file_info['filepath'], 'wb')
-                    self.file_size = file_info['size']
+                    if mode == "U":
+                        log.info(f"Receiving file '{self.file_info['filename']}' ({self.file_id}) from {self.client_info}")
+                        self.state = "UPLOAD_WAIT_FILESIZE"
+                    
+                    elif mode == "D":
+                        log.info(f"Sending file '{self.file_info['filename']}' ({self.file_id}) to {self.client_info}")
+                        self.state = "DOWNLOADING"
+                        self.download_task = asyncio.create_task(self.start_download())
+                    
+                    else:
+                        log.error(f"Invalid file transfer mode '{mode}' from {self.client_info}")
+                        self.transport.close()
+                        return
+                
+                elif self.state == "UPLOAD_WAIT_FILESIZE":
+                    if len(self.buffer) < 8:
+                        break # Not enough data
+                    
+                    self.file_size = struct.unpack('!Q', self.buffer[:8])[0]
+                    self.buffer = self.buffer[8:]
                     self.bytes_received = 0
-                    # Check if there's any file data in this first packet
-                    remaining_data = data[37:]
-                    if remaining_data:
-                        self.process_upload_chunk(remaining_data)
+                    
+                    if self.file_size != self.file_info['size']:
+                        log.error(f"File size mismatch for {self.file_id}. Expected {self.file_info['size']}, client says {self.file_size}")
+                        self.transport.close()
+                        return
+                        
+                    self.file_handle = open(self.file_info['filepath'], 'wb')
+                    self.state = "UPLOAD_WAIT_CHUNK_SIZE"
                 
-                elif mode == "D":
-                    log.info(f"Sending file '{file_info['filename']}' ({self.file_id}) to {self.client_info}")
-                    self.state = "DOWNLOADING"
-                    self.start_download(file_info['filepath'])
+                elif self.state == "UPLOAD_WAIT_CHUNK_SIZE":
+                    if len(self.buffer) < 4:
+                        break # Not enough data
+                    
+                    self.expected_chunk_size = struct.unpack('!I', self.buffer[:4])[0]
+                    self.buffer = self.buffer[4:]
+                    self.state = "UPLOAD_WAIT_CHUNK_DATA"
                 
+                elif self.state == "UPLOAD_WAIT_CHUNK_DATA":
+                    if len(self.buffer) < self.expected_chunk_size:
+                        break # Not enough data
+                    
+                    chunk_data = self.buffer[:self.expected_chunk_size]
+                    self.buffer = self.buffer[self.expected_chunk_size:]
+                    
+                    self.file_handle.write(chunk_data)
+                    self.bytes_received += len(chunk_data)
+                    
+                    if self.bytes_received >= self.file_size:
+                        # --- UPLOAD COMPLETE ---
+                        self.file_handle.close()
+                        self.file_handle = None
+                        self.transport.write(b'1') # Send acknowledgment
+                        log.info(f"File upload complete for {self.file_id} from {self.client_info}")
+                        # Notify command server to broadcast
+                        self.server_state.finalize_file_upload(self.file_id)
+                        self.state = "COMPLETE"
+                        self.transport.close() # Close connection
+                        
+                    else:
+                        # Wait for next chunk
+                        self.state = "UPLOAD_WAIT_CHUNK_SIZE"
+                
+                elif self.state == "DOWNLOADING":
+                    # Waiting for download task to complete
+                    # Any data received here is unexpected
+                    log.warning(f"Unexpected data from {self.client_info} during download.")
+                    self.buffer = b'' # Discard
+                    break
+                    
+                elif self.state == "DOWNLOAD_WAIT_ACK":
+                    if len(self.buffer) >= 1:
+                        if self.buffer.startswith(b'1'):
+                            log.info(f"Client acknowledged download for {self.file_id}")
+                        self.transport.close()
+                        break
+                    
+                elif self.state == "COMPLETE":
+                    self._running = False
+                    break
+                    
                 else:
-                    log.error(f"Invalid file transfer mode '{mode}' from {self.client_info}")
-                    self.transport.close()
+                    break # No valid state, wait for more data
 
-            elif self.state == "UPLOADING":
-                self.process_upload_chunk(data)
-                
         except Exception as e:
             log.error(f"Error in FileTransferProtocol.data_received: {e}", exc_info=True)
+            if self.file_handle:
+                self.file_handle.close()
             self.transport.close()
+            self._running = False
 
-    def process_upload_chunk(self, data):
-        self.bytes_received += len(data)
-        self.file_handle.write(data)
-        
-        if self.bytes_received >= self.file_size:
-            log.info(f"File upload complete for {self.file_id} from {self.client_info}")
-            self.file_handle.close()
-            self.transport.close()
-            # Notify command server to broadcast
-            self.server_state.finalize_file_upload(self.file_id)
-
-    def start_download(self, filepath):
+    async def start_download(self):
+        """
+        --- FIX: This method now sends data in the
+        [size][chunk_size][chunk]... protocol.
+        """
+        filepath = self.file_info['filepath']
         try:
+            file_size = os.path.getsize(filepath)
+            
+            # 1. Send file size (8 bytes)
+            self.transport.write(struct.pack('!Q', file_size))
+            await self.transport.drain()
+            
             with open(filepath, 'rb') as f:
                 while True:
                     chunk = f.read(65536) # 64KB chunks
                     if not chunk:
                         break
+                    
+                    # 2. Send chunk size (4 bytes)
+                    self.transport.write(struct.pack('!I', len(chunk)))
+                    
+                    # 3. Send chunk
                     self.transport.write(chunk)
+                    
+                    await self.transport.drain() # Wait for buffer to clear
+            
+            # 4. Wait for client acknowledgment
+            self.state = "DOWNLOAD_WAIT_ACK"
             log.info(f"File download complete for {self.file_id} to {self.client_info}")
+
+        except asyncio.CancelledError:
+            log.info(f"Download task for {self.file_id} cancelled.")
             self.transport.close()
         except FileNotFoundError:
             log.error(f"Could not find file {filepath} for download.")
@@ -494,156 +621,6 @@ class FileTransferProtocol(asyncio.Protocol):
             log.error(f"Error sending file {filepath}: {e}", exc_info=True)
             self.transport.close()
 
-    def connection_lost(self, exc):
-        if self.state == "UPLOADING" and self.file_handle:
-            self.file_handle.close()
-            if self.bytes_received < self.file_size:
-                log.warning(f"File upload for {self.file_id} was incomplete.")
-                # TODO: Delete the partial file
-        
-        log.debug(f"File connection closed from {self.client_info}")
-
-class ClientHandler:
-    """
-    Manages a single client connection on the TCP Command Server.
-    This class contains all the logic for Modules 3, 4, 5.
-    """
-    def __init__(self, reader, writer, server_state):
-        self.reader = reader
-        self.writer = writer
-        self.server_state = server_state
-        self.addr = writer.get_extra_info('peername')
-        self.client_id = None
-        self.username = "Unknown"
-        self.last_heartbeat = asyncio.get_running_loop().time()
-        self.is_running = True
-
-    async def handle_client(self):
-        """Main loop for reading messages from a single client."""
-        log.info(f"New command connection from {self.addr}")
-        try:
-            while self.is_running:
-                # 1. Read the fixed-size header
-                header_bytes = await self.reader.readexactly(HEADER_SIZE)
-                if not header_bytes:
-                    break
-                
-                # 2. Unpack the header
-                magic, ver, msg_type_val, session_id, payload_len = struct.unpack(HEADER_FORMAT, header_bytes)
-                
-                # 3. Validate header
-                if magic != MAGIC_NUMBER:
-                    log.error(f"Invalid magic number from {self.addr}. Disconnecting.")
-                    break
-                
-                if self.client_id and session_id != self.client_id:
-                    log.warning(f"Session ID mismatch for {self.username}. Expected {self.client_id}, got {session_id}")
-                    # Don't break, but log it
-                
-                try:
-                    msg_type = MessageType(msg_type_val)
-                except ValueError:
-                    log.error(f"Unknown message type {msg_type_val} from {self.username}")
-                    # Discard payload if unknown
-                    if payload_len > 0:
-                        await self.reader.readexactly(payload_len)
-                    continue
-                
-                # 4. Read the variable-length payload
-                payload_data = {}
-                if payload_len > 0:
-                    payload_bytes = await self.reader.readexactly(payload_len)
-                    if not payload_bytes:
-                        break
-                    try:
-                        payload_data = json.loads(payload_bytes.decode('utf-8'))
-                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                        log.error(f"Failed to decode payload from {self.username}: {e}")
-                        continue
-                
-                log.debug(f"Received {msg_type.name} from {self.username} ({payload_len} bytes)")
-                
-                # 5. Route the message to the correct handler
-                if msg_type == MessageType.AUTHENTICATION_REQUEST:
-                    await self.handle_authentication(payload_data)
-                elif msg_type == MessageType.HEARTBEAT:
-                    self.last_heartbeat = asyncio.get_running_loop().time()
-                elif msg_type == MessageType.SEND_TEXT_MESSAGE:
-                    await self.handle_text_message(payload_data)
-                elif msg_type == MessageType.SCREEN_SHARE_START_REQUEST:
-                    await self.handle_screen_share_start()
-                elif msg_type == MessageType.SCREEN_SHARE_STOP_REQUEST:
-                    await self.handle_screen_share_stop()
-                elif msg_type == MessageType.SCREEN_SHARE_DATA_FRAME:
-                    await self.handle_screen_share_data(payload_data)
-                elif msg_type == MessageType.FILE_TRANSFER_NOTIFY_REQUEST:
-                    await self.handle_file_notify(payload_data)
-                elif msg_type == MessageType.FILE_UPLOAD_START_REQUEST:
-                    await self.handle_file_upload_start(payload_data)
-                elif msg_type == MessageType.FILE_DOWNLOAD_START_REQUEST:
-                    await self.handle_file_download_start(payload_data)
-                # elif msg_type == MessageType.SET_UDP_PORT_REQUEST:
-                #     await self.handle_set_udp_port(payload_data)
-                elif msg_type == MessageType.SET_UDP_PORT_REQUEST:
-                    await self.handle_set_udp_port(payload_data)
-                elif msg_type == MessageType.SET_MEDIA_STATE_REQUEST:  # <-- ADD THIS ELIF BLOCK
-                    await self.handle_set_media_state(payload_data)
-                else:
-                    log.warning(f"Unhandled message type {msg_type.name} from {self.username}")
-
-        except asyncio.IncompleteReadError:
-            log.info(f"Client {self.username} (TCP) closed the connection.")
-        except ConnectionError as e:
-            log.warning(f"Connection error for {self.username}: {e}")
-        except Exception as e:
-            log.error(f"Error handling client {self.username}: {e}", exc_info=True)
-        finally:
-            self.is_running = False
-            # Clean up client state
-            if self.client_id:
-                # If this client was presenting, stop it
-                if self.server_state.is_presenter(self.client_id):
-                    await self.handle_screen_share_stop()
-                    
-                self.server_state.remove_client(self.client_id)
-            if self.writer and not self.writer.is_closing():
-                self.writer.close()
-                await self.writer.wait_closed()
-            log.info(f"Connection from {self.username} @ {self.addr} closed.")
-            await self.server_state.broadcast_presence()
-
-    async def send_message(self, msg_type: MessageType, payload: dict, session_id: int = None):
-        """Packs and sends a message to this client."""
-        if self.writer.is_closing():
-            log.warning(f"Attempted to write to closed socket for {self.username}")
-            return
-            
-        if session_id is None:
-            session_id = self.client_id if self.client_id else 0
-            
-        try:
-            payload_bytes = json.dumps(payload).encode('utf-8')
-            payload_len = len(payload_bytes)
-            
-            header = struct.pack(
-                HEADER_FORMAT,
-                MAGIC_NUMBER,
-                PROTOCOL_VERSION,
-                msg_type.value,
-                session_id,
-                payload_len
-            )
-            
-            self.writer.write(header)
-            self.writer.write(payload_bytes)
-            await self.writer.drain()
-            log.debug(f"Sent {msg_type.name} to {self.username}")
-            
-        except ConnectionError as e:
-            log.warning(f"Connection error while sending to {self.username}: {e}")
-            self.is_running = False # Mark for cleanup
-        except Exception as e:
-            log.error(f"Error in send_message for {self.username}: {e}", exc_info=True)
 
     async def handle_authentication(self, payload):
         """Handles Module 4: Authentication"""
