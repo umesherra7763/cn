@@ -668,7 +668,7 @@ class FileTransferThread(QThread):
             log.error(f"File server connection refused at {self.host}:{self.port}")
             self.transfer_error.emit(self.file_id, "Connection refused.")
         except Exception as e:
-            log.error(f"File transfer error: {e}", exc_info=True)
+            log.error(f"File transfer error during {self.mode} for {self.file_id}: {e}", exc_info=True)
             self.transfer_error.emit(self.file_id, str(e))
         finally:
             if s:
@@ -867,7 +867,7 @@ if cv2:
         
         WIDTH = 640
         HEIGHT = 480
-        QUALITY = 40 # JPEG quality
+        QUALITY = 30 # JPEG quality
         
         def __init__(self, host, port, session_id):
             super().__init__()
@@ -1984,7 +1984,7 @@ class MainWindow(QMainWindow):
     def stop_all_threads(self):
         """Gracefully stop all running threads before exit."""
         log.info("Stopping all background threads...")
-        if self.network_client and self.network_client.is_running():
+        if self.network_client and self.network_client.isRunning():
             self.network_client.stop()
         if self.screen_capture_thread:
             self.screen_capture_thread.stop()
