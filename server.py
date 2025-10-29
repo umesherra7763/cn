@@ -40,7 +40,7 @@ from PySide6.QtCore import QObject, QThread, Signal, Qt, Slot
 from PySide6.QtGui import QColor
 
 # --- Configuration ---
-HOST = '192.168.100.6'  # Listen on all available network interfaces
+HOST = '192.168.100.5'  # Listen on all available network interfaces
 TCP_COMMAND_PORT = 5000
 TCP_FILE_PORT = 5001
 UDP_AUDIO_PORT = 5002
@@ -449,13 +449,21 @@ class FileTransferProtocol(asyncio.Protocol):
         log.info(f"File connection from {self.client_info} on port {TCP_FILE_PORT}")
         # Set a 5-second timeout to receive the header
         self.timeout_handle = asyncio.get_running_loop().call_later(
-            5, self.check_timeout
+            30, self.check_timeout
         )
+    def safe_close(self, reason=""):
+        try:
+            log.warning(f"Closing connection from {self.client_info}. Reason: {reason}")
+            self.transport.write(b'0')  # Send failure signal
+        except Exception as e:
+            log.error(f"Failed to send error ack: {e}")
+        finally:
+            self.transport.close()
 
     def check_timeout(self):
         if self.state == "WAIT_HEADER":
             log.warning(f"File connection from {self.client_info} timed out waiting for header.")
-            self.transport.close()
+            self.safe_close("Reason for closing...")
 
     def connection_lost(self, exc):
         if self.state == "UPLOADING" and self.file_handle:
@@ -492,7 +500,7 @@ class FileTransferProtocol(asyncio.Protocol):
                     self.file_info = self.server_state.get_file_info(self.file_id)
                     if not self.file_info:
                         log.error(f"File ID {self.file_id} not found for {self.client_info}")
-                        self.transport.close()
+                        self.safe_close("Reason for closing...")
                         return
 
                     if mode == "U":
@@ -506,7 +514,7 @@ class FileTransferProtocol(asyncio.Protocol):
                    
                     else:
                         log.error(f"Invalid file transfer mode '{mode}' from {self.client_info}")
-                        self.transport.close()
+                        self.safe_close("Reason for closing...")
                         return
                
                 elif self.state == "UPLOAD_WAIT_FILESIZE":
@@ -517,10 +525,11 @@ class FileTransferProtocol(asyncio.Protocol):
                     self.buffer = self.buffer[8:]
                     self.bytes_received = 0
                    
-                    if self.file_size != self.file_info['size']:
-                        log.error(f"File size mismatch for {self.file_id}. Expected {self.file_info['size']}, client says {self.file_size}")
-                        self.transport.close()
+                    if abs(self.file_size - self.file_info['size']) > 4:  # small tolerance
+                        log.error(f"File size mismatch for {self.file_id}. Expected {self.file_info['size']}, got {self.file_size}")
+                        self.safe_close("File size mismatch")
                         return
+
                        
                     self.file_handle = open(self.file_info['filepath'], 'wb')
                     self.state = "UPLOAD_WAIT_CHUNK_SIZE"
@@ -552,7 +561,7 @@ class FileTransferProtocol(asyncio.Protocol):
                         # Notify command server to broadcast
                         self.server_state.finalize_file_upload(self.file_id)
                         self.state = "COMPLETE"
-                        self.transport.close() # Close connection
+                        self.safe_close("Reason for closing...") # Close connection
                        
                     else:
                         # Wait for next chunk
@@ -569,7 +578,7 @@ class FileTransferProtocol(asyncio.Protocol):
                     if len(self.buffer) >= 1:
                         if self.buffer.startswith(b'1'):
                             log.info(f"Client acknowledged download for {self.file_id}")
-                        self.transport.close()
+                        self.safe_close("Reason for closing...")
                         break
                    
                 elif self.state == "COMPLETE":
@@ -583,7 +592,7 @@ class FileTransferProtocol(asyncio.Protocol):
             log.error(f"Error in FileTransferProtocol.data_received: {e}", exc_info=True)
             if self.file_handle:
                 self.file_handle.close()
-            self.transport.close()
+            self.safe_close("Reason for closing...")
             self._running = False
 
     async def start_download(self):
@@ -619,13 +628,13 @@ class FileTransferProtocol(asyncio.Protocol):
 
         except asyncio.CancelledError:
             log.info(f"Download task for {self.file_id} cancelled.")
-            self.transport.close()
+            self.safe_close("Reason for closing...")
         except FileNotFoundError:
             log.error(f"Could not find file {filepath} for download.")
-            self.transport.close()
+            self.safe_close("Reason for closing...")
         except Exception as e:
             log.error(f"Error sending file {filepath}: {e}", exc_info=True)
-            self.transport.close()
+            self.safe_close("Reason for closing...")
 
 # --- (End of Fix 1) ---
 

@@ -84,7 +84,7 @@ except ImportError:
 
 
 # --- Protocol Constants (must match server.py) ---
-HOST = '192.168.100.6'  # Connect to localhost by default. CHANGE TO SERVER'S LAN IP
+HOST = '192.168.100.5'  # Connect to localhost by default. CHANGE TO SERVER'S LAN IP
 TCP_COMMAND_PORT = 5000
 TCP_FILE_PORT = 5001
 UDP_AUDIO_PORT = 5002  # Server's audio port
@@ -682,7 +682,7 @@ class FileTransferThread(QThread):
                 file_size = os.path.getsize(self.filepath)
                 bytes_sent = 0
 
-                # 1. Send total file size (8 bytes) - THIS IS THE MISSING STEP
+                # 1. Send total file size (8 bytes) - THIS IS THE CRITICAL FIX
                 sock.sendall(struct.pack('!Q', file_size))
 
                 while self._running:
@@ -690,7 +690,7 @@ class FileTransferThread(QThread):
                     if not chunk:
                         break
                     
-                    # 2. Send chunk size (4 bytes) - THIS IS THE MISSING STEP
+                    # 2. Send chunk size (4 bytes) - THIS IS THE CRITICAL FIX
                     sock.sendall(struct.pack('!I', len(chunk)))
                     
                     # 3. Send chunk data
@@ -705,8 +705,11 @@ class FileTransferThread(QThread):
                 ack = sock.recv(1)
                 if ack == b'1':
                     self.transfer_complete.emit(self.file_id)
+                elif ack == b'0':
+                    self.transfer_error.emit(self.file_id, "Server reported an error during upload.")
                 else:
-                    self.transfer_error.emit(self.file_id, "Server did not acknowledge upload.")
+                    self.transfer_error.emit(self.file_id, f"Unexpected server response: {ack}")
+
                     
         except FileNotFoundError:
             self.transfer_error.emit(self.file_id, "Local file not found.")
