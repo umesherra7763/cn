@@ -1521,20 +1521,20 @@ class MainWindow(QMainWindow):
         self.known_files = {} # {file_id: {filename, ...}}
         
         # --- Connect Model Signals to Controller Slots ---
-        self.network_client.connection_status.connect(self.on_connection_status)
-        self.network_client.authentication_success.connect(self.on_auth_success)
-        self.network_client.authentication_failure.connect(self.on_auth_failure)
+        # self.network_client.connection_status.connect(self.on_connection_status)
+        # self.network_client.authentication_success.connect(self.on_auth_success)
+        # self.network_client.authentication_failure.connect(self.on_auth_failure)
         
-        self.network_client.message_received.connect(self.conference_page.add_chat_message)
-        self.network_client.presence_update.connect(self.on_presence_update)
+        # self.network_client.message_received.connect(self.conference_page.add_chat_message)
+        # self.network_client.presence_update.connect(self.on_presence_update)
         
-        self.network_client.screen_share_started.connect(self.conference_page.set_presenter)
-        self.network_client.screen_share_stopped.connect(self.conference_page.stop_presenting)
-        self.network_client.screen_share_data_received.connect(self.conference_page.update_screen_share_image)
+        # self.network_client.screen_share_started.connect(self.conference_page.set_presenter)
+        # self.network_client.screen_share_stopped.connect(self.conference_page.stop_presenting)
+        # self.network_client.screen_share_data_received.connect(self.conference_page.update_screen_share_image)
         
-        self.network_client.file_notify_received.connect(self.on_file_notify)
-        self.network_client.file_upload_approved.connect(self.on_file_upload_approved)
-        self.network_client.file_download_approved.connect(self.on_file_download_approved)
+        # self.network_client.file_notify_received.connect(self.on_file_notify)
+        # self.network_client.file_upload_approved.connect(self.on_file_upload_approved)
+        # self.network_client.file_download_approved.connect(self.on_file_download_approved)
 
         # --- Connect View Signals to Controller Slots ---
         self.login_page.login_attempt.connect(self.on_login_attempt)
@@ -1718,6 +1718,21 @@ class MainWindow(QMainWindow):
 
         # 1. Create the new network client
         self.network_client = NetworkClient(self.server_host, TCP_COMMAND_PORT)
+        # --- Connect Model Signals to Controller Slots ---
+        self.network_client.connection_status.connect(self.on_connection_status)
+        self.network_client.authentication_success.connect(self.on_auth_success)
+        self.network_client.authentication_failure.connect(self.on_auth_failure)
+
+        self.network_client.message_received.connect(self.conference_page.add_chat_message)
+        self.network_client.presence_update.connect(self.on_presence_update)
+
+        self.network_client.screen_share_started.connect(self.conference_page.set_presenter)
+        self.network_client.screen_share_stopped.connect(self.conference_page.stop_presenting)
+        self.network_client.screen_share_data_received.connect(self.conference_page.update_screen_share_image)
+
+        self.network_client.file_notify_received.connect(self.on_file_notify)
+        self.network_client.file_upload_approved.connect(self.on_file_upload_approved)
+        self.network_client.file_download_approved.connect(self.on_file_download_approved)
 
         # 2. Connect ALL signals again (required for new instance)
         self.network_client.connection_status.connect(self.on_connection_status)
