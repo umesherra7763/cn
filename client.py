@@ -677,41 +677,41 @@ class FileTransferThread(QThread):
             log.info(f"File transfer thread for {self.file_id} finished.")
 
     def run_upload(self, sock):
-            try:
-                with open(self.filepath, 'rb') as f:
-                    file_size = os.path.getsize(self.filepath)
-                    bytes_sent = 0
+        try:
+            with open(self.filepath, 'rb') as f:
+                file_size = os.path.getsize(self.filepath)
+                bytes_sent = 0
 
-                    # 1. Send total file size (8 bytes)
-                    sock.sendall(struct.pack('!Q', file_size))
+                # 1. Send total file size (8 bytes) - THIS IS THE MISSING STEP
+                sock.sendall(struct.pack('!Q', file_size))
 
-                    while self._running:
-                        chunk = f.read(65536) # 64KB chunks
-                        if not chunk:
-                            break
-                        
-                        # 2. Send chunk size (4 bytes)
-                        sock.sendall(struct.pack('!I', len(chunk)))
-                        
-                        # 3. Send chunk data
-                        sock.sendall(chunk)
+                while self._running:
+                    chunk = f.read(65536) # 64KB chunks
+                    if not chunk:
+                        break
+                    
+                    # 2. Send chunk size (4 bytes) - THIS IS THE MISSING STEP
+                    sock.sendall(struct.pack('!I', len(chunk)))
+                    
+                    # 3. Send chunk data
+                    sock.sendall(chunk)
 
-                        bytes_sent += len(chunk)
-                        progress = int((bytes_sent / file_size) * 100)
-                        self.transfer_progress.emit(progress)
-                
-                if self._running:
-                    # 4. Wait for server acknowledgment
-                    ack = sock.recv(1)
-                    if ack == b'1':
-                        self.transfer_complete.emit(self.file_id)
-                    else:
-                        self.transfer_error.emit(self.file_id, "Server did not acknowledge upload.")
-                        
-            except FileNotFoundError:
-                self.transfer_error.emit(self.file_id, "Local file not found.")
-            except Exception as e:
-                self.transfer_error.emit(self.file_id, f"Upload error: {e}")
+                    bytes_sent += len(chunk)
+                    progress = int((bytes_sent / file_size) * 100)
+                    self.transfer_progress.emit(progress)
+            
+            if self._running:
+                # 4. Wait for server acknowledgment
+                ack = sock.recv(1)
+                if ack == b'1':
+                    self.transfer_complete.emit(self.file_id)
+                else:
+                    self.transfer_error.emit(self.file_id, "Server did not acknowledge upload.")
+                    
+        except FileNotFoundError:
+            self.transfer_error.emit(self.file_id, "Local file not found.")
+        except Exception as e:
+            self.transfer_error.emit(self.file_id, f"Upload error: {e}")
 
     def run_download(self, sock):
         try:
