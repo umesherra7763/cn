@@ -84,7 +84,7 @@ except ImportError:
 
 
 # --- Protocol Constants (must match server.py) ---
-HOST = '192.168.100.2'  # Connect to localhost by default. CHANGE TO SERVER'S LAN IP
+HOST = '192.168.100.6'  # Connect to localhost by default. CHANGE TO SERVER'S LAN IP
 TCP_COMMAND_PORT = 5000
 TCP_FILE_PORT = 5001
 UDP_AUDIO_PORT = 5002  # Server's audio port
@@ -677,40 +677,78 @@ class FileTransferThread(QThread):
             log.info(f"File transfer thread for {self.file_id} finished.")
 
     def run_upload(self, sock):
-        try:
-            with open(self.filepath, 'rb') as f:
-                file_size = os.path.getsize(self.filepath)
-                bytes_sent = 0
-                while self._running:
-                    chunk = f.read(65536) # 64KB chunks
-                    if not chunk:
-                        break
-                    sock.sendall(chunk)
-                    bytes_sent += len(chunk)
-                    progress = int((bytes_sent / file_size) * 100)
-                    self.transfer_progress.emit(progress)
-                    
-            if self._running:
-                self.transfer_complete.emit(self.file_id)
+            try:
+                with open(self.filepath, 'rb') as f:
+                    file_size = os.path.getsize(self.filepath)
+                    bytes_sent = 0
+
+                    # 1. Send total file size (8 bytes)
+                    sock.sendall(struct.pack('!Q', file_size))
+
+                    while self._running:
+                        chunk = f.read(65536) # 64KB chunks
+                        if not chunk:
+                            break
+                        
+                        # 2. Send chunk size (4 bytes)
+                        sock.sendall(struct.pack('!I', len(chunk)))
+                        
+                        # 3. Send chunk data
+                        sock.sendall(chunk)
+
+                        bytes_sent += len(chunk)
+                        progress = int((bytes_sent / file_size) * 100)
+                        self.transfer_progress.emit(progress)
                 
-        except FileNotFoundError:
-            self.transfer_error.emit(self.file_id, "Local file not found.")
-        except Exception as e:
-            self.transfer_error.emit(self.file_id, f"Upload error: {e}")
+                if self._running:
+                    # 4. Wait for server acknowledgment
+                    ack = sock.recv(1)
+                    if ack == b'1':
+                        self.transfer_complete.emit(self.file_id)
+                    else:
+                        self.transfer_error.emit(self.file_id, "Server did not acknowledge upload.")
+                        
+            except FileNotFoundError:
+                self.transfer_error.emit(self.file_id, "Local file not found.")
+            except Exception as e:
+                self.transfer_error.emit(self.file_id, f"Upload error: {e}")
 
     def run_download(self, sock):
         try:
+            # 1. Read total file size (8 bytes)
+            file_size_bytes = sock.recv(8)
+            if len(file_size_bytes) < 8:
+                raise ConnectionError("Server disconnected while sending file size.")
+            file_size = struct.unpack('!Q', file_size_bytes)[0]
+            bytes_received = 0
+
             with open(self.filepath, 'wb') as f:
-                # We don't know the file size, so we can't show progress
-                # (unless server sends it, which is a protocol enhancement)
-                self.transfer_progress.emit(50) # Show generic "in-progress"
-                while self._running:
-                    chunk = sock.recv(65536) # 64KB chunks
-                    if not chunk:
-                        break
-                    f.write(chunk)
+                while self._running and bytes_received < file_size:
+                    # 2. Read chunk size (4 bytes)
+                    chunk_size_bytes = sock.recv(4)
+                    if len(chunk_size_bytes) < 4:
+                        raise ConnectionError("Server disconnected while sending chunk size.")
+                    chunk_size = struct.unpack('!I', chunk_size_bytes)[0]
+                    
+                    # 3. Read chunk data (in a loop to ensure all bytes are received)
+                    chunk_data = b''
+                    while len(chunk_data) < chunk_size:
+                        to_read = chunk_size - len(chunk_data)
+                        packet = sock.recv(min(to_read, 65536))
+                        if not packet:
+                            raise ConnectionError("Server disconnected while sending chunk data.")
+                        chunk_data += packet
+                    
+                    f.write(chunk_data)
+                    bytes_received += len(chunk_data)
+
+                    if file_size > 0:
+                        progress = int((bytes_received / file_size) * 100)
+                        self.transfer_progress.emit(progress)
             
             if self._running:
+                # 4. Send acknowledgment
+                sock.sendall(b'1')
                 self.transfer_complete.emit(self.file_id)
                 
         except Exception as e:
