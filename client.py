@@ -84,7 +84,7 @@ except ImportError:
 
 
 # --- Protocol Constants (must match server.py) ---
-HOST = '192.168.100.3'  # Connect to localhost by default. CHANGE TO SERVER'S LAN IP
+HOST = '192.168.100.2'  # Connect to localhost by default. CHANGE TO SERVER'S LAN IP
 TCP_COMMAND_PORT = 5000
 TCP_FILE_PORT = 5001
 UDP_AUDIO_PORT = 5002  # Server's audio port
@@ -132,6 +132,7 @@ class MessageType(IntEnum):
     # Audio/Video (UDP)
     SET_UDP_PORT_REQUEST = 500 # FIX: This was the wrong value before
     SET_UDP_PORT_SUCCESS = 501
+    SET_MEDIA_STATE_REQUEST = 502
 
 # --- SVG Icon Definitions ---
 SVG_ICONS = {
@@ -1013,12 +1014,18 @@ if cv2:
 
 class LoginPage(QWidget):
     """View for the login screen."""
-    login_attempt = Signal(str, str) # username, password
+    login_attempt = Signal(str, str,str) # host,username, password
 
     def __init__(self):
         super().__init__()
         self.setObjectName("LoginPage") # For styling
-        
+        # --- ADD SERVER IP INPUT ---
+        self.server_ip_input = QLineEdit()
+        self.server_ip_input.setPlaceholderText("e.g., 192.168.1.10 or localhost")
+        # Try to get default from HOST if defined, else use 127.0.0.1
+        default_host = HOST if 'HOST' in globals() and HOST else '127.0.0.1'
+        self.server_ip_input.setText(default_host)
+        # --- END ADD ---        
         self.username_input = QLineEdit()
         self.username_input.setPlaceholderText("Username (e.g., 'testuser')")
         self.password_input = QLineEdit()
@@ -1031,6 +1038,7 @@ class LoginPage(QWidget):
         self.status_label.setObjectName("StatusLabel")
 
         form_layout = QFormLayout()
+        form_layout.addRow("Server IP:", self.server_ip_input)
         form_layout.addRow("Username:", self.username_input)
         form_layout.addRow("Password:", self.password_input)
         form_layout.addRow(self.login_button)
@@ -1052,15 +1060,16 @@ class LoginPage(QWidget):
         self.password_input.returnPressed.connect(self.on_login_click)
         
     def on_login_click(self):
+        host = self.server_ip_input.text().strip() # <-- GET HOST
         username = self.username_input.text().strip()
         password = self.password_input.text()
-        if username and password:
+        if host and username and password: # <-- CHECK HOST
             self.login_button.setEnabled(False)
-            self.status_label.setText("Attempting to log in...")
+            self.status_label.setText("Attempting connect & login...")
             self.status_label.setProperty("error", False)
-            self.login_attempt.emit(username, password)
+            self.login_attempt.emit(host, username, password) # <-- EMIT HOST
         else:
-            self.set_status("Username and password cannot be empty.", is_error=True)
+            self.set_status("Server IP, Username, and Password cannot be empty.", is_error=True)
             
     def set_status(self, text, is_error=False):
         self.login_button.setEnabled(True)
@@ -1348,6 +1357,7 @@ class MainConferencePage(QWidget):
         if username != "You (Presenting)":
             self.share_button.setDisabled(True)
             self.share_button.setToolTip("Someone else is presenting")
+            self.share_button.setToolTip("Stop Sharing")
         else:
             # We are the presenter
             self.share_button.setToolTip("Stop Sharing")
@@ -1491,9 +1501,9 @@ class MainWindow(QMainWindow):
         
         # --- Model/Thread References ---
         self.session_id = None
-        self.network_client = NetworkClient(HOST, TCP_COMMAND_PORT)
-        self.server_host = ""
-        self.login_payload = {}
+        self.network_client = None # Will be created on login
+        self.server_host = "" # Will store the host IP entered by user
+        self.login_payload = {} # To store login details for sending *after* connect
         self.screen_capture_thread = None
         self.file_transfer_threads = {} # {file_id: thread}
         self.audio_capture_thread = None
@@ -1539,7 +1549,7 @@ class MainWindow(QMainWindow):
         self.conference_page.mic_toggled.connect(self.on_mic_toggled)
 
         # Start the network thread
-        self.network_client.start()
+        # self.network_client.start()
         
     # --- Controller Slots for Model Signals ---
     
@@ -1671,12 +1681,92 @@ class MainWindow(QMainWindow):
 
     # --- Controller Slots for View Signals ---
     
-    @Slot(str, str)
-    def on_login_attempt(self, username, password):
-        """Controller logic to send auth request to model."""
-        payload = {'username': username, 'password': password}
-        self.network_client.post_message(MessageType.AUTHENTICATION_REQUEST, payload)
-        self.server_host = HOST # <-- ADD THIS. Store the host
+    
+    @Slot(str, str, str)
+    def on_login_attempt(self, host, username, password):
+        """Controller logic to create/start network client and store login details."""
+
+        # Store login details & host
+        self.server_host = host # Store the host for other threads
+        self.login_payload = {'username': username, 'password': password}
+
+        # --- Gracefully handle switching servers ---
+        if self.network_client and self.network_client.isRunning():
+            if self.network_client._host == host:
+                # Same server, just re-sending login attempt
+                log.info(f"Re-attempting login to {host} as {username}")
+                self.network_client.post_message(MessageType.AUTHENTICATION_REQUEST, self.login_payload)
+                return
+            else:
+                # Different server! Stop everything first.
+                log.info(f"Switching server connection from {self.network_client._host} to {host}")
+                self.stop_all_threads() # Stop network and media threads
+                # Clear UI elements from old session
+                self.conference_page.user_list_widget.clear()
+                self.conference_page.file_list_widget.clear()
+                self.conference_page.chat_display.clear()
+                for widget in self.conference_page.user_video_widgets.values():
+                    self.conference_page.video_grid_layout.removeWidget(widget)
+                    widget.deleteLater()
+                self.conference_page.user_video_widgets.clear()
+                self.known_users.clear()
+                self.known_files.clear()
+        # --- End server switching logic ---
+
+        log.info(f"Attempting new connection to {host}:{TCP_COMMAND_PORT}...")
+        self.status_bar.showMessage(f"Connecting to {host}...")
+
+        # 1. Create the new network client
+        self.network_client = NetworkClient(self.server_host, TCP_COMMAND_PORT)
+
+        # 2. Connect ALL signals again (required for new instance)
+        self.network_client.connection_status.connect(self.on_connection_status)
+        self.network_client.authentication_success.connect(self.on_auth_success)
+        self.network_client.authentication_failure.connect(self.on_auth_failure)
+        self.network_client.message_received.connect(self.conference_page.add_chat_message)
+        self.network_client.presence_update.connect(self.on_presence_update)
+        self.network_client.screen_share_started.connect(self.conference_page.set_presenter)
+        self.network_client.screen_share_stopped.connect(self.conference_page.stop_presenting)
+        self.network_client.screen_share_data_received.connect(self.conference_page.update_screen_share_image)
+        self.network_client.file_notify_received.connect(self.on_file_notify)
+        self.network_client.file_upload_approved.connect(self.on_file_upload_approved)
+        self.network_client.file_download_approved.connect(self.on_file_download_approved)
+
+        # 3. Add temporary signal to send login *after* connection established
+        self.network_client.connection_status.connect(self.on_initial_connection_for_login)
+
+        # 4. Start the new network client thread
+        self.network_client.start()
+
+    @Slot(str)
+    def on_initial_connection_for_login(self, status):
+        """
+        Special slot connected temporarily to connection_status.
+        Waits for the 'Connected. Authenticating...' signal, then sends
+        the stored login credentials. Disconnects itself afterwards.
+        """
+        if "Connected. Authenticating..." in status:
+            log.info("Connection successful, sending login credentials...")
+            # Now that TCP connection is up, send the stored login payload
+            if self.login_payload:
+                self.network_client.post_message(MessageType.AUTHENTICATION_REQUEST, self.login_payload)
+            else:
+                log.warning("Login requested but no payload was stored.")
+            # Disconnect this temporary slot - it's done its job
+            try:
+                self.network_client.connection_status.disconnect(self.on_initial_connection_for_login)
+            except RuntimeError: # Already disconnected maybe
+                pass
+        elif "failed" in status.lower() or "Error" in status or "Disconnected" in status:
+            log.warning(f"Connection attempt failed or disconnected before login could be sent ({status}).")
+            # Disconnect this temporary slot
+            try:
+                if self.network_client: # Check if client exists
+                    self.network_client.connection_status.disconnect(self.on_initial_connection_for_login)
+            except RuntimeError: # Already disconnected maybe
+                pass
+            # Re-enable login button via login page status update
+            self.login_page.set_status(f"Connection Failed: {status}", is_error=True)    
 
     @Slot(str)
     def on_send_chat_message(self, text):
@@ -1879,7 +1969,7 @@ class MainWindow(QMainWindow):
     def stop_all_threads(self):
         """Gracefully stop all running threads before exit."""
         log.info("Stopping all background threads...")
-        if self.network_client:
+        if self.network_client and self.network_client.is_running():
             self.network_client.stop()
         if self.screen_capture_thread:
             self.screen_capture_thread.stop()
