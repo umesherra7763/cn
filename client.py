@@ -84,7 +84,7 @@ except ImportError:
 
 
 # --- Protocol Constants (must match server.py) ---
-HOST = '192.168.144.48'  # Connect to localhost by default. CHANGE TO SERVER'S LAN IP
+HOST = '192.168.137.186'  # Connect to localhost by default. CHANGE TO SERVER'S LAN IP
 TCP_COMMAND_PORT = 5000
 TCP_FILE_PORT = 5001
 UDP_AUDIO_PORT = 5002  # Server's audio port
@@ -1230,6 +1230,7 @@ class MainConferencePage(QWidget):
         files_tab = QWidget()
         files_layout = QVBoxLayout(files_tab)
         self.file_list_widget = QListWidget()
+        self.file_list_widget.itemDoubleClicked.connect(self.request_file_download)
         self.file_list_widget.setToolTip("Double-click a file to download")
         self.upload_button = QPushButton("Upload File")
         self.upload_button.setObjectName("UploadButton")
@@ -1468,18 +1469,47 @@ class MainConferencePage(QWidget):
     def add_video_widget(self, session_id, username):
         """Adds a new video widget to the grid for a new user."""
         if session_id in self.user_video_widgets:
-            return # Already exists
-            
+            return  # Already exists
+
         log.info(f"Adding video widget for {username} (ID: {session_id})")
         widget = self.create_video_placeholder(username)
         self.user_video_widgets[session_id] = widget
-        
-        # Add to grid
-        # FIX: Corrected grid logic
-        count = len(self.user_video_widgets) # 0-based index of new widget
-        row = (count // 2) + 1 # Start on row 1 (0 is for local)
-        col = count % 2
+
+        # --- FIX: Proper horizontal layout ---
+        count = len(self.user_video_widgets)
+        cols = 2  # Number of columns (you + 1 remote, adjust as needed)
+        row = (count - 1) // cols  # No +1 offset
+        col = (count - 1) % cols + 1  # +1 to skip local video column (col=0)
         self.video_grid_layout.addWidget(widget, row, col)
+
+        # Optional: make all video widgets expand evenly
+        widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    @Slot()
+    def request_file_download(self):
+        """
+        Triggered when user double-clicks a file in the list.
+        Sends FILE_DOWNLOAD_START_REQUEST to the server.
+        """
+        selected_item = self.file_list_widget.currentItem()
+        if not selected_item:
+            QMessageBox.warning(self, "No File Selected", "Please select a file to download.")
+            return
+
+        file_id = selected_item.data(Qt.UserRole)
+        if not file_id:
+            QMessageBox.warning(self, "Invalid Selection", "The selected file has no ID.")
+            return
+
+        main_window = self.window()  # QMainWindow that owns the network_client
+        if hasattr(main_window, "network_client"):
+            main_window.network_client.post_message(
+                MessageType.FILE_DOWNLOAD_START_REQUEST,
+                {"file_id": file_id}
+            )
+            QMessageBox.information(self, "Download Requested", "Waiting for server approval...")
+        else:
+            QMessageBox.warning(self, "Error", "Network client not found.")
 
     def remove_video_widget(self, session_id):
         """Removes a video widget when a user leaves and re-grids the others."""
@@ -1498,8 +1528,10 @@ class MainConferencePage(QWidget):
             i = 0
             for session_id_key, widget_item in self.user_video_widgets.items():
                 count = i # 0-based index
-                row = (count // 2) + 1 # Start on row 1 (row 0 is for local video)
-                col = count % 2
+                cols = 2
+                row = count // cols
+                col = (count % cols) + 1  # skip col 0 (local video)
+                self.video_grid_layout.addWidget(widget_item, row, col)
                 self.video_grid_layout.addWidget(widget_item, row, col)
                 i += 1
 
@@ -1727,24 +1759,28 @@ class MainWindow(QMainWindow):
         
     @Slot(str, str)
     def on_file_download_approved(self, file_id, filename):
-        """Server confirmed our download. Start the download thread."""
-        local_save_path = self.known_files[file_id].get('local_save_path')
-        if not local_save_path:
-            log.error(f"Cannot start download for {file_id}, save path unknown.")
+        """
+        Called when the server approves a file download.
+        Starts a FileTransferThread to download the file.
+        """
+        log.info(f"Server approved download for {filename} ({file_id})")
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "Save File As", filename, "All Files (*)"
+        )
+        if not save_path:
+            log.info("User cancelled file download.")
             return
-            
-        log.info(f"Server approved download for {file_id}. Starting transfer...")
-        self.status_progress.setValue(0)
-        self.status_progress.show()
-        
-        thread = FileTransferThread("DOWNLOAD", self.server_host, TCP_FILE_PORT, file_id, local_save_path)
-        thread.transfer_complete.connect(self.on_transfer_complete)
-        thread.transfer_error.connect(self.on_transfer_error)
-        thread.transfer_progress.connect(self.status_progress.setValue)
-        
-        self.file_transfer_threads[file_id] = thread
-        log.info(f"Starting DOWNLOAD thread for file_id {file_id} from {self.server_host}:{TCP_FILE_PORT}")
-        thread.start()
+
+        self.file_transfer_thread = FileTransferThread(
+            "DOWNLOAD", self.server_host, TCP_FILE_PORT, file_id, save_path
+        )
+        self.file_transfer_thread.transfer_progress.connect(self.on_file_transfer_progress)
+        self.file_transfer_thread.transfer_complete.connect(self.on_file_transfer_complete)
+        self.file_transfer_thread.transfer_error.connect(self.on_file_transfer_error)
+        self.file_transfer_thread.start()
+
+        QMessageBox.information(self, "Download Started", f"Downloading {filename}...")
 
     # --- Controller Slots for View Signals ---
     

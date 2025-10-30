@@ -40,7 +40,7 @@ from PySide6.QtCore import QObject, QThread, Signal, Qt, Slot
 from PySide6.QtGui import QColor
 
 # --- Configuration ---
-HOST = '192.168.144.48'  # Listen on all available network interfaces
+HOST = '192.168.137.186'  # Listen on all available network interfaces
 TCP_COMMAND_PORT = 5000
 TCP_FILE_PORT = 5001
 UDP_AUDIO_PORT = 5002
