@@ -84,7 +84,7 @@ except ImportError:
 
 
 # --- Protocol Constants (must match server.py) ---
-HOST = '192.168.100.5'  # Connect to localhost by default. CHANGE TO SERVER'S LAN IP
+HOST = '192.168.144.48'  # Connect to localhost by default. CHANGE TO SERVER'S LAN IP
 TCP_COMMAND_PORT = 5000
 TCP_FILE_PORT = 5001
 UDP_AUDIO_PORT = 5002  # Server's audio port
@@ -656,8 +656,10 @@ class FileTransferThread(QThread):
             s.connect((self.host, self.port))
             
             # Send the header: [Mode (1 byte)][File_ID (36 bytes)]
-            header = f"{self.mode[0]}{self.file_id}".encode('utf-8')
+            # Always send fixed 37 bytes: 1 byte mode + 36 ASCII ID
+            header = f"{self.mode[0]}{self.file_id}".encode('ascii', 'ignore')[:37].ljust(37, b' ')
             s.sendall(header)
+
             
             if self.mode == "UPLOAD":
                 self.run_upload(s)
@@ -1700,6 +1702,27 @@ class MainWindow(QMainWindow):
         self.file_transfer_threads[file_id] = thread
         log.info(f"Starting UPLOAD thread for file_id {file_id} to {self.server_host}:{TCP_FILE_PORT}") # <-- ADD THIS
         thread.start()
+    @Slot(str, str, int, str)
+    def on_file_notify(self, file_id, filename, size, uploader_name):
+        """
+        Called when the server broadcasts that a new file is available.
+        Updates the file list widget in the UI.
+        """
+        log.info(f"New file available: {filename} ({size} bytes) from {uploader_name}")
+
+        # Create display text for the list
+        display_text = f"{filename} ({size/1024:.1f} KB) - by {uploader_name}"
+
+        # Create list item and store file_id for reference
+        item = QListWidgetItem(display_text)
+        item.setData(Qt.UserRole, file_id)
+
+        # Add to the file list widget on the conference page
+        try:
+            self.conference_page.file_list_widget.addItem(item)
+        except AttributeError:
+            log.warning("File list widget not found in conference_page.")
+
         
         
     @Slot(str, str)

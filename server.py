@@ -40,7 +40,7 @@ from PySide6.QtCore import QObject, QThread, Signal, Qt, Slot
 from PySide6.QtGui import QColor
 
 # --- Configuration ---
-HOST = '192.168.100.5'  # Listen on all available network interfaces
+HOST = '192.168.144.48'  # Listen on all available network interfaces
 TCP_COMMAND_PORT = 5000
 TCP_FILE_PORT = 5001
 UDP_AUDIO_PORT = 5002
@@ -434,6 +434,8 @@ class FileTransferProtocol(asyncio.Protocol):
         self._running = True
 
     # --- Utility ---
+    def connection_lost(self, exc):
+        print("CONNECTION LOST", self.client_info, exc)
 
     def safe_close(self, reason=""):
         """Gracefully close connection and notify client if possible."""
@@ -481,8 +483,9 @@ class FileTransferProtocol(asyncio.Protocol):
                         break
                     header = self.buffer[:37]
                     self.buffer = self.buffer[37:]
-                    mode = header[:1].decode()
-                    self.file_id = header[1:].decode()
+                    mode = header[:1].decode('ascii', errors='ignore')
+                    self.file_id = header[1:].decode('ascii', errors='ignore').strip()
+
 
                     self.file_info = self.server_state.get_file_info(self.file_id)
                     if not self.file_info:
