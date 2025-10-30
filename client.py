@@ -84,7 +84,7 @@ except ImportError:
 
 
 # --- Protocol Constants (must match server.py) ---
-HOST = '192.168.137.186'  # Connect to localhost by default. CHANGE TO SERVER'S LAN IP
+HOST = '192.168.144.48'  # Connect to localhost by default. CHANGE TO SERVER'S LAN IP
 TCP_COMMAND_PORT = 5000
 TCP_FILE_PORT = 5001
 UDP_AUDIO_PORT = 5002  # Server's audio port
@@ -1617,7 +1617,7 @@ class MainWindow(QMainWindow):
         self.conference_page.send_message.connect(self.on_send_chat_message)
         self.conference_page.share_screen_toggled.connect(self.on_share_screen_toggled)
         self.conference_page.upload_file_requested.connect(self.on_upload_file)
-        self.conference_page.download_file_requested.connect(self.on_download_file)
+        # self.conference_page.download_file_requested.connect(self.on_download_file)
         self.conference_page.hang_up_requested.connect(self.close) # Main window's close
         
         self.conference_page.video_toggled.connect(self.on_video_toggled)
@@ -1697,6 +1697,17 @@ class MainWindow(QMainWindow):
         if file_id not in self.known_files:
             self.known_files[file_id] = {'filename': filename, 'size': size}
             self.conference_page.add_file_to_list(file_id, filename, size, uploader_name)
+    @Slot(str)
+    def on_download_file_requested(self, file_id):
+        """
+        Handles download requests emitted from MainConferencePage.
+        Sends FILE_DOWNLOAD_START_REQUEST to the server.
+        """
+        log.info(f"Sending download request for file_id={file_id}")
+        self.network_client.post_message(
+            MessageType.FILE_DOWNLOAD_START_REQUEST,
+            {"file_id": file_id}
+        )
 
     @Slot(str, str)
     def on_file_upload_approved(self, file_id, filename):
@@ -1836,6 +1847,7 @@ class MainWindow(QMainWindow):
         self.network_client.file_notify_received.connect(self.on_file_notify)
         self.network_client.file_upload_approved.connect(self.on_file_upload_approved)
         self.network_client.file_download_approved.connect(self.on_file_download_approved)
+        self.conference_page.download_file_requested.connect(self.on_download_file_requested)
 
         # 2. Connect ALL signals again (required for new instance)
 
@@ -1940,29 +1952,19 @@ class MainWindow(QMainWindow):
             self.conference_page.add_chat_message("System", f"Notifying server about '{filename}'...")
 
     @Slot(str)
-    def on_download_file(self, file_id):
-        """User double-clicked a file. Show 'Save As' dialog."""
-        if file_id not in self.known_files:
-            log.error(f"Unknown file_id {file_id} requested for download.")
-            return
-            
-        filename = self.known_files[file_id]['filename']
-        
-        # FIX: Correctly get save path *before* sending request
-        save_path, _ = QFileDialog.getSaveFileName(self, "Save File As...", filename)
-        
-        if save_path:
-            # Store the path
-            self.known_files[file_id]['local_save_path'] = save_path
-            
-            # Now, tell the server we want this file
-            payload = {'file_id': file_id}
-            self.network_client.post_message(MessageType.FILE_DOWNLOAD_REQUEST, payload)
-            self.conference_page.add_chat_message("System", f"Requesting to download '{filename}'...")
-        else:
-            log.info("File download cancelled by user.")
+    def on_download_file_requested(self, file_id):
+        """
+        Handles download requests emitted from MainConferencePage.
+        Sends FILE_DOWNLOAD_START_REQUEST to the server.
+        """
+        log.info(f"Sending download request for file_id={file_id}")
+        self.network_client.post_message(
+            MessageType.FILE_DOWNLOAD_START_REQUEST,
+            {"file_id": file_id}
+        )
+    
 
-    # --- Media Thread Management ---
+        # --- Media Thread Management ---
     def start_media_players(self):
         """Start the UDP listeners for audio and video."""
         if pyaudio and np:
