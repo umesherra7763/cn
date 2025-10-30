@@ -126,6 +126,7 @@ class MessageType(IntEnum):
     FILE_TRANSFER_NOTIFY_BROADCAST = 401
     FILE_DOWNLOAD_REQUEST = 402  # This is a client->server request
     FILE_UPLOAD_START_RESPONSE = 404 # Server->client: OK to upload
+    FILE_DOWNLOAD_START_REQUEST = 405
     FILE_DOWNLOAD_START_RESPONSE = 406 # Server->client: OK to download
     FILE_TRANSFER_ERROR = 407
 
