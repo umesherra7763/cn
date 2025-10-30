@@ -1417,8 +1417,8 @@ class MainConferencePage(QWidget):
         
         self.share_button.setDisabled(False)
         self.share_button.setToolTip("Share Screen")
-        if self.share_button.isChecked():
-            self.share_button.setChecked(False)
+        # if self.share_button.isChecked():
+        #     self.share_button.setChecked(False)
 
     @Slot(str)
     def update_screen_share_image(self, base64_data):
